@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Mobile Pong — Smooth Physics</title>
+  <style>
+    :root{
+      --bg:#0b0f1a;
+      --panel:#0f1724;
+      --accent:#39d0ff;
+      --muted:#8892a6;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%}
+    body{
+      background: radial-gradient(1200px 800px at 10% 10%, rgba(57,208,255,0.04), transparent),
+                  radial-gradient(1000px 700px at 90% 90%, rgba(255,255,255,0.02), transparent),
+                  var(--bg);
+      color:#e6eef8;
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial;
+      -webkit-font-smoothing:antialiased;
+      -moz-osx-font-smoothing:grayscale;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      flex-direction:column;
+      min-height:100vh;
+      gap:12px;
+      padding:12px;
+    }
+
+    #game{
+      width:100%;
+      max-width:900px;
+      aspect-ratio:16/9;
+      border-radius:14px;
+      box-shadow: 0 6px 30px rgba(2,6,23,0.6);
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+      touch-action: none;
+      display:block;
+    }
+
+    #ui{
+      width:100%;
+      max-width:900px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:12px;
+      margin-bottom:-8px;
+    }
+
+    #score{
+      font-size:18px;
+      color:var(--accent);
+      display:flex;
+      align-items:center;
+      gap:8px;
+      user-select:none;
+    }
+    #score .sep{color:var(--muted)}
+
+    #controls{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      color:var(--muted);
+    }
+    #controls select, #controls button{
+      background:transparent;
+      border:1px solid rgba(255,255,255,0.06);
+      color:inherit;
+      padding:6px 10px;
+      border-radius:8px;
+      cursor:pointer;
+    }
+
+    #hint{
+      color:var(--muted);
+      font-size:12px;
+      max-width:900px;
+      text-align:center;
+      user-select:none;
+    }
+
+    @media (max-width:420px){
+      #hint{font-size:11px}
+    }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="score">
+      <span id="leftScore">0</span>
+      <span class="sep">·</span>
+      <span id="rightScore">0</span>
+    </div>
+    <div id="controls">
+      <label style="display:flex;align-items:center;gap:8px;">
+        Difficulty
+        <select id="difficulty">
+          <option value="0.5">Easy</option>
+          <option value="1" selected>Normal</option>
+          <option value="1.5">Hard</option>
+          <option value="2">Expert</option>
+        </select>
+      </label>
+      <button id="restart">Restart</button>
+    </div>
+  </div>
+
+  <canvas id="game"></canvas>
+
+  <div id="hint">Touch left / right to control paddles. Single-player vs CPU (right).</div>
+
+  <script>
+  // Mobile-friendly Pong with smooth physics, paddle animations, particles, and WebAudio hit sounds.
+  (function () {
+    // Canvas setup
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    // UI
+    const leftScoreEl = document.getElementById('leftScore');
+    const rightScoreEl = document.getElementById('rightScore');
+    const restartBtn = document.getElementById('restart');
+    const difficultySel = document.getElementById('difficulty');
+
+    // Device pixel scaling
+    function resize() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(300, Math.floor(rect.width * dpr));
+      canvas.height = Math.max(200, Math.floor(rect.height * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener('resize', resize);
+    // initial size: ensure canvas has layout size before resize
+    requestAnimationFrame(() => { resize(); updateSizes(); });
+
+    // Helper
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const rand = (a,b)=>a+(b-a)*Math.random();
+
+    // Game constants (tweakable)
+    const config = {
+      paddleWidth: 14,
+      paddleHeightRatio: 0.18, // % of canvas height
+      ballRadius: 10,
+      initialBallSpeed: 380, // px/s
+      maxBallSpeed: 900,
+      speedIncrease: 1.06, // multiply on paddle hit
+      maxBounceAngle: Math.PI * 60 / 180, // 60 degrees
+      aiBaseSpeed: 420, // px/s
+      aiReaction: 0.08, // smoothing
+      particleCount: 18,
+    };
+
+    // Game state
+    let state = {};
+    function resetState() {
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width;
+      const h = rect.height;
+      state = {
+        w, h,
+        leftScore: 0, rightScore: 0,
+        ball: {
+          x: w/2, y: h/2,
+          vx: (Math.random() > 0.5 ? 1 : -1) * config.initialBallSpeed,
+          vy: rand(-100,100),
+          speed: config.initialBallSpeed,
+          radius: config.ballRadius,
+          trail: [],
+          hitTimer: 0,
+        },
+        left: {
+          x: 20,
+          y: h/2,
+          targetY: h/2,
+          width: config.paddleWidth,
+          height: Math.max(48, h*config.paddleHeightRatio),
+          scale: 1,
+          scaleTimer: 0,
+        },
+        right: {
+          x: w-20-config.paddleWidth,
+          y: h/2,
+          targetY: h/2,
+          width: config.paddleWidth,
+          height: Math.max(48, h*config.paddleHeightRatio),
+          scale: 1,
+          scaleTimer: 0,
+        },
+        particles: [],
+        paused: false,
+        lastHitSide: null,
+        accumulated: 0,
+      };
+    }
+    resetState();
+    leftScoreEl.textContent = "0";
+    rightScoreEl.textContent = "0";
+
+    // WebAudio short click for hits (no assets)
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playHitSound(speed) {
+      try {
+        const t = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(clamp(300 + speed*0.2, 300, 1200), t);
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.12, t + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.23);
+      } catch (e) {
+        // ignore audio errors
+      }
+    }
+
+    // Particle system
+    function spawnParticles(x, y, color) {
+      for (let i=0;i<config.particleCount;i++){
+        const speed = rand(80, 320);
+        const ang = rand(0, Math.PI*2);
+        state.particles.push({
+          x, y,
+          vx: Math.cos(ang)*speed,
+          vy: Math.sin(ang)*speed,
+          life: rand(0.35,0.9),
+          t: 0,
+          color,
+          size: rand(2,5),
+        });
+      }
+    }
+
+    // Physics update (fixed-ish dt with delta)
+    let lastTime = performance.now();
+    function step(now) {
+      const elapsed = (now - lastTime)/1000;
+      lastTime = now;
+      update(elapsed);
+      render();
+      requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+
+    function update(dt) {
+      if (state.paused) return;
+      // update paddles toward targets with smoothing
+      const left = state.left;
+      const right = state.right;
+      const h = state.h;
+
+      const paddleLerp = 12;
+      left.y += (left.targetY - left.y) * clamp(1 - Math.exp(-paddleLerp * dt), 0, 1);
+      right.y += (right.targetY - right.y) * clamp(1 - Math.exp(-paddleLerp * dt), 0, 1);
+
+      // keep paddles inside
+      left.y = clamp(left.y, left.height/2, h - left.height/2);
+      right.y = clamp(right.y, right.height/2, h - right.height/2);
+
+      // CPU moves right paddle (single-player)
+      const diff = difficultySel.value ? parseFloat(difficultySel.value) : 1;
+      const aiSpeed = config.aiBaseSpeed * diff;
+      // simple prediction + smoothing
+      const predictY = state.ball.y + state.ball.vy * 0.18;
+      right.targetY += (predictY - right.targetY) * (config.aiReaction * diff);
+
+      // update ball
+      const ball = state.ball;
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+
+      // wall collisions (top/bottom)
+      if (ball.y - ball.radius < 0) {
+        ball.y = ball.radius;
+        ball.vy = Math.abs(ball.vy);
+        smallWallBounceEffect(ball.x, ball.y);
+      } else if (ball.y + ball.radius > h) {
+        ball.y = h - ball.radius;
+        ball.vy = -Math.abs(ball.vy);
+        smallWallBounceEffect(ball.x, ball.y);
+      }
+
+      // paddles rects
+      const leftRect = {
+        x: left.x,
+        y: left.y - left.height/2,
+        w: left.width,
+        h: left.height
+      };
+      const rightRect = {
+        x: right.x,
+        y: right.y - right.height/2,
+        w: right.width,
+        h: right.height
+      };
+
+      // check collision with left paddle
+      if (ball.x - ball.radius < leftRect.x + leftRect.w &&
+          ball.x - ball.radius > leftRect.x &&
+          ball.y > leftRect.y &&
+          ball.y < leftRect.y + leftRect.h) {
+        // collision
+        ball.x = leftRect.x + leftRect.w + ball.radius;
+        handlePaddleHit('left', left);
+      }
+
+      // right paddle
+      if (ball.x + ball.radius > rightRect.x &&
+          ball.x + ball.radius < rightRect.x + rightRect.w &&
+          ball.y > rightRect.y &&
+          ball.y < rightRect.y + rightRect.h) {
+        ball.x = rightRect.x - ball.radius;
+        handlePaddleHit('right', right);
+      }
+
+      // scoring (ball out left or right)
+      if (ball.x + ball.radius < 0) {
+        // right scores
+        state.rightScore++;
+        rightScoreEl.textContent = state.rightScore;
+        resetBall('right');
+      } else if (ball.x - ball.radius > state.w) {
+        state.leftScore++;
+        leftScoreEl.textContent = state.leftScore;
+        resetBall('left');
+      }
+
+      // particle update
+      for (let i = state.particles.length -1; i >= 0; i--) {
+        const p = state.particles[i];
+        p.t += dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vx *= 0.98;
+        p.vy *= 0.98;
+        if (p.t > p.life) state.particles.splice(i,1);
+      }
+
+      // paddles scale/animation timers
+      [left, right].forEach(p => {
+        if (p.scaleTimer > 0) {
+          p.scaleTimer -= dt;
+          p.scale = 1 + 0.12 * Math.sin((p.scaleTimer/0.16)*Math.PI);
+          if (p.scaleTimer <= 0) {
+            p.scaleTimer = 0;
+            p.scale = 1;
+          }
+        }
+      });
+
+      // trail - keep recent positions to draw soft trail
+      ball.trail.unshift({x:ball.x, y:ball.y, t:0});
+      if (ball.trail.length > 10) ball.trail.pop();
+      for (let i=0;i<ball.trail.length;i++) ball.trail[i].t += dt;
+    }
+
+    function smallWallBounceEffect(x,y){
+      spawnParticles(x,y,'#9bdcff');
+    }
+
+    function handlePaddleHit(side, paddle) {
+      const ball = state.ball;
+      // compute relative hit position
+      const relativeY = (ball.y - paddle.y) / (paddle.height/2); // -1 .. 1
+      const clamped = clamp(relativeY, -1, 1);
+      const angle = clamped * config.maxBounceAngle;
+      // new direction
+      const dir = side === 'left' ? 1 : -1;
+      // speed increases a bit
+      ball.speed = Math.min(config.maxBallSpeed, ball.speed * config.speedIncrease);
+      ball.vx = dir * Math.cos(angle) * ball.speed;
+      ball.vy = Math.sin(angle) * ball.speed;
+      // animate paddle
+      paddle.scaleTimer = 0.16;
+      // sound & particles
+      playHitSound(ball.speed);
+      spawnParticles(ball.x, ball.y, '#ffffff');
+
+      // small position correction
+      if (side === 'left') ball.x = paddle.x + paddle.width + ball.radius;
+      else ball.x = paddle.x - ball.radius;
+
+      state.lastHitSide = side;
+    }
+
+    function resetBall(lastLostSide) {
+      const w = state.w, h = state.h;
+      state.ball.x = w/2;
+      state.ball.y = h/2;
+      // send ball to the side *opposite* the player who scored
+      const dir = lastLostSide === 'left' ? -1 : 1;
+      state.ball.speed = config.initialBallSpeed;
+      state.ball.vx = dir * state.ball.speed;
+      state.ball.vy = rand(-140, 140);
+      // small delay (pause) for a moment
+      state.paused = true;
+      setTimeout(() => { state.paused = false; }, 450);
+    }
+
+    // Rendering
+    function render() {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      ctx.clearRect(0,0,w,h);
+
+      // background / soft vignette:
+      const bg = ctx.createLinearGradient(0,0,0,h);
+      bg.addColorStop(0, 'rgba(255,255,255,0.02)');
+      bg.addColorStop(1, 'rgba(0,0,0,0.02)');
+      ctx.fillStyle = bg;
+      ctx.fillRect(0,0,w,h);
+
+      // middle dashed net
+      ctx.save();
+      ctx.translate(w/2,0);
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      const dashH = Math.max(6, h*0.03);
+      for (let y=6; y < h-6; y += dashH*1.6) {
+        ctx.fillRect(-1, y, 2, dashH);
+      }
+      ctx.restore();
+
+      // particles
+      for (const p of state.particles) {
+        const life = clamp(1 - (p.t / p.life), 0, 1);
+        ctx.globalAlpha = life;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * life, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // paddles
+      drawPaddle(state.left);
+      drawPaddle(state.right);
+
+      // ball trail
+      const ball = state.ball;
+      for (let i=ball.trail.length-1;i>=0;i--) {
+        const t = ball.trail[i];
+        const alpha = clamp(0.05 + (1 - i/ball.trail.length)*0.35 - t.t*1.8, 0, 0.5);
+        ctx.fillStyle = 'rgba(57,208,255,'+alpha+')';
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, ball.radius*(1 - i/ball.trail.length*0.6), 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      // ball with glow
+      const g = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, ball.radius*3.2);
+      g.addColorStop(0, 'rgba(57,208,255,0.85)');
+      g.addColorStop(0.2, 'rgba(57,208,255,0.35)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius*1.9, 0, Math.PI*2);
+      ctx.fill();
+
+      // ball core
+      ctx.fillStyle = '#e6f8ff';
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI*2);
+      ctx.fill();
+
+      // optional UI overlay for paused
+      if (state.paused) {
+        ctx.fillStyle = 'rgba(2,6,12,0.45)';
+        ctx.fillRect(0,0,w,h);
+      }
+    }
+
+    function drawPaddle(p) {
+      const ctxx = ctx;
+      const x = p.x;
+      const y = p.y;
+      const w = p.width;
+      const h = p.height;
+      const scale = p.scale || 1;
+
+      ctxx.save();
+      ctxx.translate(x + w/2, y);
+      ctxx.scale(scale, 1);
+      // body
+      ctxx.fillStyle = 'rgba(255,255,255,0.08)';
+      roundRect(ctxx, -w/2, -h/2, w, h, 6);
+      ctxx.fill();
+
+      // accent inner
+      const g = ctxx.createLinearGradient(-w/2, 0, w/2, 0);
+      g.addColorStop(0, 'rgba(57,208,255,0.08)');
+      g.addColorStop(1, 'rgba(57,208,255,0.18)');
+      ctxx.fillStyle = g;
+      roundRect(ctxx, -w/2+2, -h/2+4, w-4, h-8, 4);
+      ctxx.fill();
+
+      ctxx.restore();
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+      const radius = Math.min(r, h/2, w/2);
+      ctx.beginPath();
+      ctx.moveTo(x+radius, y);
+      ctx.arcTo(x+w, y, x+w, y+h, radius);
+      ctx.arcTo(x+w, y+h, x, y+h, radius);
+      ctx.arcTo(x, y+h, x, y, radius);
+      ctx.arcTo(x, y, x+w, y, radius);
+      ctx.closePath();
+    }
+
+    // Input: touch & mouse
+    function getRelativeY(evt, clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      return {x, y};
+    }
+
+    function onPointerDown(e) {
+      e.preventDefault();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      handlePointer(e, true);
+      window.addEventListener(pointerMoveEvent, onPointerMove, {passive:false});
+      window.addEventListener(pointerUpEvent, onPointerUp, {passive:false});
+    }
+    function onPointerMove(e) {
+      e.preventDefault();
+      handlePointer(e, false);
+    }
+    function onPointerUp(e) {
+      e.preventDefault();
+      handlePointerUp(e);
+      window.removeEventListener(pointerMoveEvent, onPointerMove);
+      window.removeEventListener(pointerUpEvent, onPointerUp);
+    }
+
+    function handlePointer(e, down) {
+      const isTouch = e.touches && e.touches.length;
+      if (isTouch) {
+        for (const t of Array.from(e.touches)) {
+          const p = getRelativeY(e, t.clientX, t.clientY);
+          dispatchPointer(p.x, p.y, t.identifier);
+        }
+      } else {
+        const p = getRelativeY(e, e.clientX, e.clientY);
+        dispatchPointer(p.x, p.y, 'mouse');
+      }
+    }
+    function handlePointerUp(e) {
+      const isTouch = e.changedTouches && e.changedTouches.length;
+      if (isTouch) {
+        for (const t of Array.from(e.changedTouches)) {
+          releasePointer(t.identifier);
+        }
+      } else {
+        releasePointer('mouse');
+      }
+    }
+
+    function dispatchPointer(x,y,id) {
+      // decide which side
+      const half = canvas.clientWidth / 2;
+      if (x < half) {
+        // left paddle control
+        state.left.targetY = clamp(y, state.left.height/2, state.h - state.left.height/2);
+      } else {
+        // right paddle control
+        state.right.targetY = clamp(y, state.right.height/2, state.h - state.right.height/2);
+      }
+    }
+    function releasePointer(id) {
+      // nothing for now
+    }
+
+    const pointerDownEvent = ('ontouchstart' in window) ? 'touchstart' : 'mousedown';
+    const pointerMoveEvent = ('ontouchmove' in window) ? 'touchmove' : 'mousemove';
+    const pointerUpEvent = ('ontouchend' in window) ? 'touchend' : 'mouseup';
+
+    window.addEventListener(pointerDownEvent, onPointerDown, {passive:false});
+    // also allow clicking on canvas to start audio/resume
+    canvas.addEventListener('click', ()=>{ if (audioCtx.state === 'suspended') audioCtx.resume(); });
+
+    // restart button
+    restartBtn.addEventListener('click', () => {
+      state.leftScore = state.rightScore = 0;
+      leftScoreEl.textContent = "0";
+      rightScoreEl.textContent = "0";
+      resetState();
+    });
+
+    // ensure canvas matches style size
+    function updateSizes() {
+      const rect = canvas.getBoundingClientRect();
+      state.w = rect.width;
+      state.h = rect.height;
+      // update paddle heights
+      const newH = Math.max(48, state.h * config.paddleHeightRatio);
+      if (state.left) state.left.height = newH;
+      if (state.right) state.right.height = newH;
+    }
+    window.addEventListener('resize', ()=>{ resize(); updateSizes(); });
+    updateSizes();
+
+  })();
+  </script>
+</body>
+</html>
+````markdown name=README.md
+```markdown
+# Mobile Pong — Smooth Physics
+
+A mobile-friendly single-file Pong game (HTML only) with:
+
+- Frame-rate independent physics
+- Bounce angle based on contact point (classic Pong feel)
+- Paddle hit animations and particle effects
+- Touch controls (tap/drag left & right)
+- Simple CPU opponent with difficulty setting
+- Small WebAudio hit sounds (no external assets)
+
+How to use locally
+
+1. Save `index.html` to a folder.
+2. Open `index.html` in a browser (mobile or desktop).
+3. Touch/click-drag left or right halves to control the paddles.
+
+Publishing on GitHub Pages
+
+- Create a repository and push these files to the `main` branch.
+- There's a workflow in `.github/workflows/deploy-pages.yml` that will deploy the repo root to GitHub Pages automatically.
+
+Customization
+
+- Tweak constants at the top of the script in `index.html` to change ball speed, paddle size, particle counts, etc.
+- You can convert this to a multi-file site (separate CSS/JS) or integrate with Cordova/Capacitor for mobile packaging.
